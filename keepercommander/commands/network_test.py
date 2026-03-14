@@ -127,19 +127,6 @@ class TestResult:
 
 # ── Color helpers ─────────────────────────────────────────────────────────────
 
-def _c(fore=None, bright=False, dim=False):
-    """Return a function that wraps a string in ANSI codes."""
-    def wrap(s: str) -> str:
-        if not HAS_COLORAMA:
-            return s
-        prefix = ''
-        if dim:
-            prefix += Style.DIM
-        if fore:
-            prefix += (fore if not bright else fore.replace('\x1b[3', '\x1b[9'))
-        return f"{prefix}{s}{Style.RESET_ALL}"
-    return wrap
-
 def _green(s):
     return f"{Fore.GREEN}{Style.BRIGHT}{s}{Style.RESET_ALL}" if HAS_COLORAMA else s
 
@@ -276,8 +263,11 @@ async def _ws_connect(url: str) -> Tuple[bool, str]:
         async with websockets.connect(url, open_timeout=DEFAULT_TIMEOUT,
                                       close_timeout=DEFAULT_TIMEOUT) as ws:
             return True, "connected"
-    except websockets.exceptions.InvalidStatusCode as e:
-        return True, f"HTTP {e.status_code}"
+    except (websockets.exceptions.InvalidStatus,
+            websockets.exceptions.InvalidStatusCode) as e:
+        # v15+: InvalidStatus with e.response.status_code; legacy: e.status_code
+        code = e.response.status_code if hasattr(e, 'response') else e.status_code
+        return True, f"HTTP {code}"
     except websockets.exceptions.ConnectionClosedOK:
         return True, "connected"
     except (websockets.exceptions.WebSocketException, Exception) as e:
@@ -296,7 +286,7 @@ def test_websocket(domain: str, verbose: bool) -> TestResult:
     name = f"WebSocket  connect.keepersecurity.{domain}:443"
     if not HAS_WEBSOCKETS:
         return TestResult(name, False, "websockets library not available")
-    url = f"wss://connect.keepersecurity.{domain}"
+    url = f"wss://connect.keepersecurity.{domain}/api/user/client"
     try:
         try:
             loop = asyncio.get_running_loop()
@@ -309,6 +299,71 @@ def test_websocket(domain: str, verbose: bool) -> TestResult:
                 passed, detail = pool.submit(asyncio.run, _ws_connect(url)).result()
         else:
             passed, detail = asyncio.run(_ws_connect(url))
+
+        return TestResult(name, passed, detail)
+    except Exception as e:
+        return TestResult(name, False, str(e) if verbose else "connection failed")
+
+
+async def _ws_connect_authenticated(url: str, params) -> Tuple[bool, str]:
+    """
+    Attempt an authenticated WebSocket connection using the live Commander session.
+    Uses get_keeper_tokens() to build TransmissionKey + Authorization headers.
+    Falls back to the unauthenticated probe if the helper is unavailable.
+    """
+    try:
+        import base64
+        from .tunnel.port_forward.tunnel_helpers import get_keeper_tokens
+        encrypted_session_token, encrypted_transmission_key, _ = get_keeper_tokens(params)
+        headers = {
+            'TransmissionKey': base64.b64encode(encrypted_transmission_key).decode(),
+            'Authorization': f'KeeperUser {base64.b64encode(encrypted_session_token).decode()}',
+        }
+        async with websockets.connect(url, additional_headers=headers,
+                                      open_timeout=DEFAULT_TIMEOUT,
+                                      close_timeout=DEFAULT_TIMEOUT) as ws:
+            return True, "authenticated"
+    except ImportError:
+        # Older Commander version without tunnel helpers — fall back gracefully
+        return await _ws_connect(url)
+    except (websockets.exceptions.InvalidStatus,
+            websockets.exceptions.InvalidStatusCode) as e:
+        # Any HTTP response means the TCP+TLS stack works
+        code = e.response.status_code if hasattr(e, 'response') else e.status_code
+        return True, f"HTTP {code}"
+    except websockets.exceptions.ConnectionClosedOK:
+        return True, "authenticated"
+    except (websockets.exceptions.WebSocketException, Exception) as e:
+        msg = str(e)
+        if 'timeout' in msg.lower() or 'timed out' in msg.lower():
+            return False, "timeout (firewall?)"
+        if 'refused' in msg.lower():
+            return False, "port closed"
+        if 'dns' in msg.lower() or 'nodename' in msg.lower():
+            return False, "DNS resolution failed"
+        return True, "reachable"
+
+
+def test_websocket_authenticated(domain: str, params, verbose: bool) -> TestResult:
+    """WebSocket test with Keeper session credentials (logged-in mode)."""
+    name = f"WebSocket  connect.keepersecurity.{domain}:443"
+    if not HAS_WEBSOCKETS:
+        return TestResult(name, False, "websockets library not available")
+    url = f"wss://connect.keepersecurity.{domain}/api/user/client"
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                passed, detail = pool.submit(
+                    asyncio.run, _ws_connect_authenticated(url, params)
+                ).result()
+        else:
+            passed, detail = asyncio.run(_ws_connect_authenticated(url, params))
 
         return TestResult(name, passed, detail)
     except Exception as e:
@@ -640,10 +695,12 @@ class NetworkTestCommand(Command):
         # ── JSON mode: batch all tests then render ────────────────────────────
         if json_output:
             groups = {}
+            ws_test = (test_websocket_authenticated(domain, params, verbose)
+                       if logged_in else test_websocket(domain, verbose))
             groups["DNS & Cloud Connectivity"] = [
                 test_dns(domain, verbose),
                 test_https(domain, verbose),
-                test_websocket(domain, verbose),
+                ws_test,
             ]
             groups[f"STUN / TURN  ({krelay})"] = [
                 test_tcp_3478(krelay, verbose),
@@ -672,9 +729,11 @@ class NetworkTestCommand(Command):
         # Group 1: DNS & Cloud Connectivity
         title = "DNS & Cloud Connectivity"
         _print_section(title)
+        ws_test = (test_websocket_authenticated(domain, params, verbose)
+                   if logged_in else test_websocket(domain, verbose))
         g1 = [test_dns(domain, verbose),
               test_https(domain, verbose),
-              test_websocket(domain, verbose)]
+              ws_test]
         groups[title] = g1
         for r in g1:
             _print_result(r)
