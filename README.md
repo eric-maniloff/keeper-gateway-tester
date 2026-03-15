@@ -1,20 +1,37 @@
-# KeeperPAM Gateway Network Readiness Tester
+# KeeperPAM Gateway Network Path Tester
 
-A `keeper gateway-tester` command for [Keeper Commander](https://github.com/Keeper-Security/Commander) that validates all network connectivity requirements for a KeeperPAM deployment.
+Verifies that all **required network paths are open** between this machine and Keeper's cloud infrastructure before deploying a KeeperPAM Gateway. Run this first — if any path is blocked, the Gateway will fail silently or partially after installation.
 
-**Zero-knowledge** — no vault data leaves the machine. All tests are outbound-only probes.
+Implemented as a `keeper gateway-tester` command for [Keeper Commander](https://github.com/Keeper-Security/Commander).
+
+**Zero-knowledge** — no vault data leaves the machine. Every test is an outbound-only probe; nothing is sent to Keeper except standard protocol handshakes.
+
+## Why run this?
+
+KeeperPAM Gateways require several distinct outbound network paths to function:
+
+| Path | Purpose | What breaks without it |
+|---|---|---|
+| DNS + HTTPS to `keepersecurity.{region}` | Vault API | Gateway cannot authenticate or sync |
+| WSS to `connect.keepersecurity.{region}:443` | Real-time control channel | Gateway connects but receives no commands |
+| TCP 3478 to `krelay` | STUN/TURN relay setup | Session negotiation fails |
+| UDP 3478 to `krelay` | STUN binding / external IP discovery | NAT traversal broken |
+| UDP 49152–65535 to `krelay` | WebRTC media (RDP, SSH audio/video) | Sessions connect but screen/audio blank |
+| TCP 636 to your LDAP server | LDAPS authentication | AD/LDAP login fails for PAM targets |
+
+Corporate firewalls, proxies, and cloud security groups commonly block one or more of these — especially UDP ports. This tool identifies exactly which paths are open or blocked before you spend time troubleshooting a live Gateway.
 
 ## What it tests
 
-| Group | Test | Protocol |
-|---|---|---|
-| DNS & Cloud | DNS resolution for Keeper API | UDP 53 |
-| DNS & Cloud | HTTPS API (`keepersecurity.{region}:443`) | TCP/TLS |
-| DNS & Cloud | WebSocket router (`connect.keepersecurity.{region}:443`) | TCP/WSS |
-| STUN / TURN | TCP port 3478 reachable (`krelay`) | TCP |
-| STUN / TURN | UDP STUN binding — returns your external IP | UDP 3478 |
-| WebRTC Media | 8 sampled ports across 49152–65535 range | UDP |
-| LDAPS (optional) | TCP + TLS cert inspection, expiry warning | TCP/TLS |
+| Group | Test | Protocol | Port |
+|---|---|---|---|
+| DNS & Cloud | DNS resolution → Keeper API | UDP | 53 |
+| DNS & Cloud | HTTPS API reachable | TCP/TLS | 443 |
+| DNS & Cloud | WebSocket control channel reachable | TCP/WSS | 443 |
+| STUN / TURN | TCP relay port open | TCP | 3478 |
+| STUN / TURN | UDP STUN binding — confirms outbound UDP + returns external IP | UDP | 3478 |
+| WebRTC Media | 8 sampled ports open across media range | UDP | 49152–65535 |
+| LDAPS (optional) | TCP port open + TLS cert valid + expiry check | TCP/TLS | 636 |
 
 Source: [KeeperPAM Gateway Network Configuration](https://docs.keeper.io/en/keeperpam/privileged-access-manager/references/gateway-network-configuration)
 
@@ -43,10 +60,10 @@ keeper gateway-tester
 # Specific region
 keeper gateway-tester --region eu
 
-# Include LDAP server check
+# Include LDAP server path check
 keeper gateway-tester --ldap-host ldap.yourcompany.com
 
-# Machine-readable JSON (for support tickets or automation)
+# Save results for a support ticket or change request
 keeper gateway-tester --json | tee connectivity-report.json
 
 # Verbose — show raw error messages
@@ -66,10 +83,10 @@ keeper gateway-tester -v
 
 ## Auto-detection (logged-in mode)
 
-When run after `keeper login`, the command automatically:
+When run after `keeper login`, the command automatically reads your session to:
 
-- **Detects your region** from the vault server URL — no `--region` flag needed
-- **Finds your LDAP host** from any PAM Configuration records in your vault — no `--ldap-host` flag needed
+- **Detect your region** from the vault server URL — no `--region` flag needed
+- **Find your LDAP host** from PAM Configuration records in your vault — no `--ldap-host` flag needed
 
 ```
 ╔════════════════════════════════════════════════════════════╗
@@ -83,6 +100,8 @@ When run after `keeper login`, the command automatically:
 
 ## Sample output
 
+All paths open:
+
 ```
 ╔════════════════════════════════════════════════════════════╗
 ║       KeeperPAM  ·  Gateway Network Readiness Tester       ║
@@ -95,7 +114,7 @@ When run after `keeper login`, the command automatically:
   ────────────────────────────────────────────────────────────
     ✓  DNS  keepersecurity.com  ·  →  100.25.27.45
     ✓  HTTPS API  keepersecurity.com:443  ·  HTTP 200
-    ✓  WebSocket  connect.keepersecurity.com:443  ·  reachable
+    ✓  WebSocket  connect.keepersecurity.com:443  ·  HTTP 401
 
   ▸  STUN / TURN  ·  krelay.keepersecurity.com
   ────────────────────────────────────────────────────────────
@@ -108,7 +127,7 @@ When run after `keeper login`, the command automatically:
     ✓  8/8 sampled ports reachable
 
   ════════════════════════════════════════════════════════════
-    ✓  GATEWAY READY  ·  10 / 10 checks passed
+    ✓  GATEWAY READY  ·  13 / 13 checks passed
   ════════════════════════════════════════════════════════════
 ```
 
