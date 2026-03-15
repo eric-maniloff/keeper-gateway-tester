@@ -13,7 +13,7 @@ A `keeper gateway-tester` command for [Keeper Commander](https://github.com/Keep
 | DNS & Cloud | WebSocket router (`connect.keepersecurity.{region}:443`) | TCP/WSS |
 | STUN / TURN | TCP port 3478 reachable (`krelay`) | TCP |
 | STUN / TURN | UDP STUN binding — returns your external IP | UDP 3478 |
-| WebRTC Media | 5 sampled ports across 49152–65535 range | UDP |
+| WebRTC Media | 8 sampled ports across 49152–65535 range | UDP |
 | LDAPS (optional) | TCP + TLS cert inspection, expiry warning | TCP/TLS |
 
 Source: [KeeperPAM Gateway Network Configuration](https://docs.keeper.io/en/keeperpam/privileged-access-manager/references/gateway-network-configuration)
@@ -104,8 +104,8 @@ When run after `keeper login`, the command automatically:
 
   ▸  WebRTC Media Ports  ·  UDP 49152–65535
   ────────────────────────────────────────────────────────────
-    ✓ 49152   ✓ 52000   ✓ 55000   ✓ 60000   ✓ 65535
-    ✓  5/5 sampled ports reachable
+    ✓ 49152   ✓ 50000   ✓ 52000   ✓ 55000   ✓ 58000   ✓ 61000   ✓ 63000   ✓ 65535
+    ✓  8/8 sampled ports reachable
 
   ════════════════════════════════════════════════════════════
     ✓  GATEWAY READY  ·  10 / 10 checks passed
@@ -120,6 +120,4 @@ When run after `keeper login`, the command automatically:
 
 ## Known limitations
 
-- UDP STUN probes use IPv4 only (`AF_INET`). IPv6-only networks will show UDP failures.
-- WebRTC port tests sample 5 ports from the 49152–65535 range rather than all 16,383.
-- The WebSocket test checks TCP reachability; a full authenticated connection requires being logged in (future enhancement).
+- WebRTC port tests sample 8 ports from the 49152–65535 range rather than all 16,383.

@@ -70,8 +70,8 @@ REGION_LABELS = {
 # Reverse map: domain suffix → region key  e.g. 'com' → 'us'
 _DOMAIN_TO_REGION = {v: k for k, v in REGIONS.items()}
 
-# UDP ports sampled to test WebRTC media range
-WEBRTC_SAMPLE_PORTS = [49152, 52000, 55000, 60000, 65535]
+# UDP ports sampled to test WebRTC media range (8 evenly-spaced across 49152–65535)
+WEBRTC_SAMPLE_PORTS = [49152, 50000, 52000, 55000, 58000, 61000, 63000, 65535]
 
 STUN_PORT = 3478
 DEFAULT_TIMEOUT = 5  # seconds
@@ -163,27 +163,35 @@ def _is_stun_success(data: bytes) -> bool:
 def _parse_stun_mapped_address(data: bytes) -> Optional[str]:
     """
     Extract the XOR-MAPPED-ADDRESS or MAPPED-ADDRESS from a STUN response.
-    Returns dotted-quad IPv4 string or None.
-    Note: IPv6 mapped addresses are not parsed (IPv4-only).
+    Returns dotted-quad IPv4 or colon-hex IPv6 string, or None.
+
+    IPv4 XOR: 4-byte addr XOR'd with magic cookie (0x2112A442).
+    IPv6 XOR: 16-byte addr XOR'd with magic cookie (4 bytes) + transaction ID
+              (12 bytes from header bytes 8–19).
     """
     if len(data) < 20:
         return None
-    offset = 20  # skip 20-byte header
+    tx_id = data[8:20]  # 12-byte transaction ID, needed for IPv6 XOR
+    offset = 20         # skip 20-byte header
     while offset + 4 <= len(data):
         attr_type = struct.unpack_from('!H', data, offset)[0]
         attr_len  = struct.unpack_from('!H', data, offset + 2)[0]
         attr_val  = data[offset + 4: offset + 4 + attr_len]
         # 0x0001 = MAPPED-ADDRESS, 0x0020 = XOR-MAPPED-ADDRESS
-        if attr_type in (0x0001, 0x0020) and len(attr_val) >= 8:
+        if attr_type in (0x0001, 0x0020) and len(attr_val) >= 4:
             family = attr_val[1]
-            if family == 0x01:  # IPv4 only; 0x02 (IPv6) not handled
-                port_raw = struct.unpack_from('!H', attr_val, 2)[0]
+            if family == 0x01 and len(attr_val) >= 8:   # IPv4
                 addr_raw = struct.unpack_from('!I', attr_val, 4)[0]
                 if attr_type == 0x0020:
-                    port_raw ^= 0x2112
                     addr_raw ^= 0x2112A442
-                ip = socket.inet_ntoa(struct.pack('!I', addr_raw))
-                return ip
+                return socket.inet_ntoa(struct.pack('!I', addr_raw))
+            elif family == 0x02 and len(attr_val) >= 20: # IPv6
+                addr_bytes = bytearray(attr_val[4:20])
+                if attr_type == 0x0020:
+                    xor_key = struct.pack('!I', 0x2112A442) + tx_id
+                    for i in range(16):
+                        addr_bytes[i] ^= xor_key[i]
+                return socket.inet_ntop(socket.AF_INET6, bytes(addr_bytes))
         offset += 4 + attr_len + (4 - attr_len % 4) % 4
     return None
 
@@ -191,33 +199,53 @@ def _parse_stun_mapped_address(data: bytes) -> Optional[str]:
 def _stun_udp_probe(host: str, port: int, bind_port: Optional[int] = None,
                     timeout: int = DEFAULT_TIMEOUT) -> Tuple[bool, str]:
     """
-    Send a STUN Binding Request to host:port over IPv4 UDP.
-    If bind_port is set, bind that local source port first (tests outbound firewall).
+    Send a STUN Binding Request to host:port over UDP.
+    Tries IPv4 first, falls back to IPv6 if no IPv4 address is available.
+    If bind_port is set, binds that local source port first (tests outbound firewall).
     Returns (success, detail_string).
-    Note: IPv4-only — uses AF_INET directly.
     """
-    # NOTE: IPv4-only; AF_INET6 or dual-stack not currently supported.
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        sock.settimeout(timeout)
-        if bind_port is not None:
-            try:
-                sock.bind(('', bind_port))
-            except OSError as e:
-                return False, f"cannot bind local port {bind_port}: {e}"
-        sock.sendto(_build_stun_request(), (host, port))
-        data, _ = sock.recvfrom(1024)
-        if _is_stun_success(data):
-            ext_ip = _parse_stun_mapped_address(data)
-            detail = f"external IP  {ext_ip}" if ext_ip else "binding success"
-            return True, detail
-        return False, "unexpected STUN response"
-    except socket.timeout:
-        return False, "no response (firewall?)"
-    except OSError as e:
-        return False, str(e)
-    finally:
-        sock.close()
+        addrs = socket.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
+    except socket.gaierror:
+        return False, "DNS resolution failed"
+
+    # Build ordered list: IPv4 entries first, then IPv6
+    families: List[Tuple[int, tuple]] = []
+    for af in (socket.AF_INET, socket.AF_INET6):
+        for res in addrs:
+            if res[0] == af:
+                families.append((af, res[4]))
+                break  # one address per family is enough
+
+    if not families:
+        return False, "no addresses resolved"
+
+    last_err = "no response (firewall?)"
+    for af, addr in families:
+        sock = socket.socket(af, socket.SOCK_DGRAM)
+        try:
+            sock.settimeout(timeout)
+            if bind_port is not None:
+                bind_host = '::' if af == socket.AF_INET6 else ''
+                try:
+                    sock.bind((bind_host, bind_port))
+                except OSError as e:
+                    last_err = f"cannot bind local port {bind_port}: {e}"
+                    continue
+            sock.sendto(_build_stun_request(), addr)
+            data, _ = sock.recvfrom(1024)
+            if _is_stun_success(data):
+                ext_ip = _parse_stun_mapped_address(data)
+                return True, f"external IP  {ext_ip}" if ext_ip else "binding success"
+            return False, "unexpected STUN response"
+        except socket.timeout:
+            last_err = "no response (firewall?)"
+        except OSError as e:
+            last_err = str(e)
+        finally:
+            sock.close()
+
+    return False, last_err
 
 
 # ── Individual test functions ─────────────────────────────────────────────────
