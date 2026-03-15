@@ -113,6 +113,11 @@ network_test_parser.add_argument(
     action='store_true',
     help='Show raw error messages',
 )
+network_test_parser.add_argument(
+    '--sample', dest='sample',
+    action='store_true',
+    help='Print a sample output showing what real results look like, then exit',
+)
 
 
 # ── Result model ─────────────────────────────────────────────────────────────
@@ -398,11 +403,18 @@ def test_websocket_authenticated(domain: str, params, verbose: bool) -> TestResu
         return TestResult(name, False, str(e) if verbose else "connection failed")
 
 
-def test_tcp_3478(host: str, verbose: bool) -> TestResult:
-    name = f"TCP {STUN_PORT}  {host}"
+def test_tcp_stun(host: str, verbose: bool) -> TestResult:
+    """Send a real STUN Binding Request over TCP and verify the response."""
+    name = f"TCP STUN  {host}:{STUN_PORT}"
     try:
-        with socket.create_connection((host, STUN_PORT), timeout=DEFAULT_TIMEOUT):
-            return TestResult(name, True, "port open")
+        with socket.create_connection((host, STUN_PORT), timeout=DEFAULT_TIMEOUT) as sock:
+            sock.sendall(_build_stun_request())
+            data = sock.recv(1024)
+        if _is_stun_success(data):
+            ext_ip = _parse_stun_mapped_address(data)
+            detail = f"external IP  {ext_ip}" if ext_ip else "binding success"
+            return TestResult(name, True, detail)
+        return TestResult(name, False, "unexpected STUN response")
     except socket.timeout:
         return TestResult(name, False, "timeout (firewall?)")
     except ConnectionRefusedError:
@@ -415,6 +427,46 @@ def test_stun_udp(host: str, verbose: bool) -> TestResult:
     name = f"UDP STUN  {host}:{STUN_PORT}"
     passed, detail = _stun_udp_probe(host, STUN_PORT)
     return TestResult(name, passed, detail)
+
+
+def test_turn_reachability(host: str, verbose: bool) -> TestResult:
+    """
+    Send an unauthenticated TURN Allocate request (RFC 5766) over UDP.
+    A 401 Unauthorized response (0x0113) proves the TURN relay path works end-to-end.
+    """
+    name = f"TURN relay  {host}:{STUN_PORT}"
+    tx_id = os.urandom(12)
+    # TURN Allocate Request: type=0x0003, length=0, magic cookie, tx_id
+    msg = struct.pack('!HHI', 0x0003, 0, 0x2112A442) + tx_id
+    try:
+        addrs = socket.getaddrinfo(host, STUN_PORT, type=socket.SOCK_DGRAM)
+    except socket.gaierror:
+        return TestResult(name, False, "DNS resolution failed")
+
+    for af in (socket.AF_INET, socket.AF_INET6):
+        for res in addrs:
+            if res[0] != af:
+                continue
+            sock = socket.socket(af, socket.SOCK_DGRAM)
+            try:
+                sock.settimeout(DEFAULT_TIMEOUT)
+                sock.sendto(msg, res[4])
+                data, _ = sock.recvfrom(1024)
+                if len(data) >= 4 and data[0:2] == b'\x01\x13':
+                    return TestResult(name, True, "reachable · auth required")
+                # Any other STUN response also means relay is reachable
+                if len(data) >= 4 and data[0] & 0xC0 == 0:
+                    return TestResult(name, True, f"reachable · response 0x{data[0:2].hex()}")
+                return TestResult(name, False, "unexpected response")
+            except socket.timeout:
+                pass  # try next address family
+            except OSError as e:
+                return TestResult(name, False, str(e) if verbose else "connection error")
+            finally:
+                sock.close()
+            break  # only try first address per family
+
+    return TestResult(name, False, "no response (firewall?)")
 
 
 def test_webrtc_ports(host: str, verbose: bool) -> List[TestResult]:
@@ -684,6 +736,44 @@ def _find_ldap_from_pam_configs(params) -> Optional[Tuple[str, int]]:
     return None
 
 
+def _print_sample_output() -> None:
+    """Render a realistic sample run using the real print functions, no network calls."""
+    domain, region = 'com', 'us'
+    ctx = {'logged_in': False}
+    _print_banner(domain, region, ctx)
+
+    _print_section("DNS & Cloud Connectivity")
+    for r in [
+        TestResult("DNS  keepersecurity.com",           True,  "→  100.25.27.45"),
+        TestResult("HTTPS API  keepersecurity.com:443", True,  "HTTP 200"),
+        TestResult("WebSocket  connect.keepersecurity.com:443", True, "HTTP 401"),
+    ]:
+        _print_result(r)
+
+    _print_section("STUN / TURN  ·  krelay.keepersecurity.com")
+    for r in [
+        TestResult("TCP STUN  krelay.keepersecurity.com:3478",  True, "external IP  107.23.98.184"),
+        TestResult("UDP STUN  krelay.keepersecurity.com:3478",  True, "external IP  107.23.98.184"),
+        TestResult("TURN relay  krelay.keepersecurity.com:3478", True, "reachable · auth required"),
+    ]:
+        _print_result(r)
+
+    _print_section("WebRTC Media Ports  ·  UDP 49152\u201365535")
+    webrtc = [TestResult(str(p), True, '') for p in WEBRTC_SAMPLE_PORTS]
+    webrtc.append(TestResult(f"{len(WEBRTC_SAMPLE_PORTS)}/{len(WEBRTC_SAMPLE_PORTS)} sampled ports reachable", True, ''))
+    _print_webrtc_results(webrtc)
+
+    _print_section("LDAPS  ·  ldap.example.com:636")
+    for r in [
+        TestResult("TCP 636  ldap.example.com",   True,  "port open"),
+        TestResult("TLS  ldap.example.com:636",   True,  "cert valid · expires 2027-01-15 (305 days)"),
+    ]:
+        _print_result(r)
+
+    _print_summary(14, 14, 0)
+    _flush(_dim("  (sample output — no network tests were run)"))
+
+
 # ── Commander Command class ───────────────────────────────────────────────────
 
 class NetworkTestCommand(Command):
@@ -700,6 +790,10 @@ class NetworkTestCommand(Command):
         ldap_port   = kwargs.get('ldap_port', 636)
         json_output = kwargs.get('json_output', False)
         verbose     = kwargs.get('verbose', False)
+
+        if kwargs.get('sample'):
+            _print_sample_output()
+            return
 
         # ── Auto-detect from Commander session if logged in ───────────────────
         logged_in  = bool(params and getattr(params, 'session_token', None))
@@ -731,8 +825,9 @@ class NetworkTestCommand(Command):
                 ws_test,
             ]
             groups[f"STUN / TURN  ({krelay})"] = [
-                test_tcp_3478(krelay, verbose),
+                test_tcp_stun(krelay, verbose),
                 test_stun_udp(krelay, verbose),
+                test_turn_reachability(krelay, verbose),
             ]
             groups["WebRTC Media Ports  (UDP 49152\u201365535)"] = \
                 test_webrtc_ports(krelay, verbose)
@@ -770,7 +865,7 @@ class NetworkTestCommand(Command):
         # Group 2: STUN / TURN
         title = f"STUN / TURN  ·  {krelay}"
         _print_section(title)
-        g2 = [test_tcp_3478(krelay, verbose), test_stun_udp(krelay, verbose)]
+        g2 = [test_tcp_stun(krelay, verbose), test_stun_udp(krelay, verbose), test_turn_reachability(krelay, verbose)]
         groups[title] = g2
         for r in g2:
             _print_result(r)
