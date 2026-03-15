@@ -113,6 +113,11 @@ network_test_parser.add_argument(
     action='store_true',
     help='Show raw error messages',
 )
+network_test_parser.add_argument(
+    '--sample', dest='sample',
+    action='store_true',
+    help='Print a sample output showing what real results look like, then exit',
+)
 
 
 # ── Result model ─────────────────────────────────────────────────────────────
@@ -731,6 +736,44 @@ def _find_ldap_from_pam_configs(params) -> Optional[Tuple[str, int]]:
     return None
 
 
+def _print_sample_output() -> None:
+    """Render a realistic sample run using the real print functions, no network calls."""
+    domain, region = 'com', 'us'
+    ctx = {'logged_in': False}
+    _print_banner(domain, region, ctx)
+
+    _print_section("DNS & Cloud Connectivity")
+    for r in [
+        TestResult("DNS  keepersecurity.com",           True,  "→  100.25.27.45"),
+        TestResult("HTTPS API  keepersecurity.com:443", True,  "HTTP 200"),
+        TestResult("WebSocket  connect.keepersecurity.com:443", True, "HTTP 401"),
+    ]:
+        _print_result(r)
+
+    _print_section("STUN / TURN  ·  krelay.keepersecurity.com")
+    for r in [
+        TestResult("TCP STUN  krelay.keepersecurity.com:3478",  True, "external IP  107.23.98.184"),
+        TestResult("UDP STUN  krelay.keepersecurity.com:3478",  True, "external IP  107.23.98.184"),
+        TestResult("TURN relay  krelay.keepersecurity.com:3478", True, "reachable · auth required"),
+    ]:
+        _print_result(r)
+
+    _print_section("WebRTC Media Ports  ·  UDP 49152\u201365535")
+    webrtc = [TestResult(str(p), True, '') for p in WEBRTC_SAMPLE_PORTS]
+    webrtc.append(TestResult(f"{len(WEBRTC_SAMPLE_PORTS)}/{len(WEBRTC_SAMPLE_PORTS)} sampled ports reachable", True, ''))
+    _print_webrtc_results(webrtc)
+
+    _print_section("LDAPS  ·  ldap.example.com:636")
+    for r in [
+        TestResult("TCP 636  ldap.example.com",   True,  "port open"),
+        TestResult("TLS  ldap.example.com:636",   True,  "cert valid · expires 2027-01-15 (305 days)"),
+    ]:
+        _print_result(r)
+
+    _print_summary(14, 14, 0)
+    _flush(_dim("  (sample output — no network tests were run)"))
+
+
 # ── Commander Command class ───────────────────────────────────────────────────
 
 class NetworkTestCommand(Command):
@@ -747,6 +790,10 @@ class NetworkTestCommand(Command):
         ldap_port   = kwargs.get('ldap_port', 636)
         json_output = kwargs.get('json_output', False)
         verbose     = kwargs.get('verbose', False)
+
+        if kwargs.get('sample'):
+            _print_sample_output()
+            return
 
         # ── Auto-detect from Commander session if logged in ───────────────────
         logged_in  = bool(params and getattr(params, 'session_token', None))
