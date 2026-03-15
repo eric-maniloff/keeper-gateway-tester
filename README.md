@@ -28,8 +28,9 @@ Corporate firewalls, proxies, and cloud security groups commonly block one or mo
 | DNS & Cloud | DNS resolution → Keeper API | UDP | 53 |
 | DNS & Cloud | HTTPS API reachable | TCP/TLS | 443 |
 | DNS & Cloud | WebSocket control channel reachable | TCP/WSS | 443 |
-| STUN / TURN | TCP relay port open | TCP | 3478 |
+| STUN / TURN | TCP STUN binding — confirms TCP path + returns external IP | TCP | 3478 |
 | STUN / TURN | UDP STUN binding — confirms outbound UDP + returns external IP | UDP | 3478 |
+| STUN / TURN | TURN relay reachability — unauthenticated Allocate → expects 401, confirming end-to-end relay path | UDP | 3478 |
 | WebRTC Media | 8 sampled ports open across media range | UDP | 49152–65535 |
 | LDAPS (optional) | TCP port open + TLS cert valid + expiry check | TCP/TLS | 636 |
 
@@ -118,8 +119,9 @@ All paths open:
 
   ▸  STUN / TURN  ·  krelay.keepersecurity.com
   ────────────────────────────────────────────────────────────
-    ✓  TCP 3478  krelay.keepersecurity.com  ·  port open
+    ✓  TCP STUN  krelay.keepersecurity.com:3478  ·  external IP  107.23.98.184
     ✓  UDP STUN  krelay.keepersecurity.com:3478  ·  external IP  107.23.98.184
+    ✓  TURN relay  krelay.keepersecurity.com:3478  ·  reachable · auth required
 
   ▸  WebRTC Media Ports  ·  UDP 49152–65535
   ────────────────────────────────────────────────────────────
@@ -127,7 +129,7 @@ All paths open:
     ✓  8/8 sampled ports reachable
 
   ════════════════════════════════════════════════════════════
-    ✓  GATEWAY READY  ·  13 / 13 checks passed
+    ✓  GATEWAY READY  ·  14 / 14 checks passed
   ════════════════════════════════════════════════════════════
 ```
 
