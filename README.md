@@ -30,7 +30,7 @@ Corporate firewalls, proxies, and cloud security groups commonly block one or mo
 | DNS & Cloud | WebSocket control channel reachable | TCP/WSS | 443 |
 | STUN / TURN | TCP STUN binding — confirms TCP path + returns external IP | TCP | 3478 |
 | STUN / TURN | UDP STUN binding — confirms outbound UDP + returns external IP | UDP | 3478 |
-| STUN / TURN | TURN relay reachability — unauthenticated Allocate → expects 401, confirming end-to-end relay path | UDP | 3478 |
+| STUN / TURN | TURN relay reachability — unauthenticated Allocate request, expects 401, confirms end-to-end relay path | UDP | 3478 |
 | WebRTC Media | 8 sampled ports open across media range | UDP | 49152–65535 |
 | LDAPS (optional) | TCP port open + TLS cert valid + expiry check | TCP/TLS | 636 |
 
@@ -67,6 +67,9 @@ keeper gateway-tester --ldap-host ldap.yourcompany.com
 # Save results for a support ticket or change request
 keeper gateway-tester --json | tee connectivity-report.json
 
+# Preview what the output looks like before running (no network calls)
+keeper gateway-tester --sample
+
 # Verbose — show raw error messages
 keeper gateway-tester -v
 ```
@@ -101,7 +104,9 @@ When run after `keeper login`, the command automatically reads your session to:
 
 ## Sample output
 
-All paths open:
+Run `keeper gateway-tester --sample` to see this instantly with no network calls.
+
+All paths open (with LDAP):
 
 ```
 ╔════════════════════════════════════════════════════════════╗
@@ -113,20 +118,32 @@ All paths open:
 
   ▸  DNS & Cloud Connectivity
   ────────────────────────────────────────────────────────────
-    ✓  DNS  keepersecurity.com  ·  →  100.25.27.45
-    ✓  HTTPS API  keepersecurity.com:443  ·  HTTP 200
-    ✓  WebSocket  connect.keepersecurity.com:443  ·  HTTP 401
+    ✓  DNS  keepersecurity.com  ·  →  100.25.27.45  (+2 addrs)  18ms
+    ✓  HTTPS API  keepersecurity.com:443  ·  HTTP 200  142ms
+    ✓  WebSocket  connect.keepersecurity.com:443  ·  HTTP 401  87ms
 
   ▸  STUN / TURN  ·  krelay.keepersecurity.com
   ────────────────────────────────────────────────────────────
-    ✓  TCP STUN  krelay.keepersecurity.com:3478  ·  external IP  107.23.98.184
-    ✓  UDP STUN  krelay.keepersecurity.com:3478  ·  external IP  107.23.98.184
-    ✓  TURN relay  krelay.keepersecurity.com:3478  ·  reachable · auth required
+    ✓  TCP STUN  krelay.keepersecurity.com:3478  ·  external IP  107.23.98.184  31ms
+    ✓  UDP STUN  krelay.keepersecurity.com:3478  ·  external IP  107.23.98.184  24ms
+    ✓  TURN relay  krelay.keepersecurity.com:3478  ·  reachable · auth required  26ms
 
   ▸  WebRTC Media Ports  ·  UDP 49152–65535
   ────────────────────────────────────────────────────────────
     ✓ 49152   ✓ 50000   ✓ 52000   ✓ 55000   ✓ 58000   ✓ 61000   ✓ 63000   ✓ 65535
     ✓  8/8 sampled ports reachable
+
+  ▸  LDAPS  ·  ldap.example.com:636
+  ────────────────────────────────────────────────────────────
+    ✓  TCP 636  ldap.example.com  ·  port open  12ms
+    ✓  TLS  ldap.example.com:636  ·  cert valid · expires 2027-01-15 (305 days)  45ms
+
+  ▸  Technical Details
+  ────────────────────────────────────────────────────────────
+    Machine     gateway-host.corp.com  ·  10.0.1.45
+    Public IP   107.23.98.184  via STUN
+    Duration    3.4s  ·  14/14 checks
+    Blocked     none — all paths open
 
   ════════════════════════════════════════════════════════════
     ✓  GATEWAY READY  ·  14 / 14 checks passed
