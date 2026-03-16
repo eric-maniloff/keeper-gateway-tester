@@ -24,6 +24,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
+import time
 from urllib.parse import urlsplit
 
 try:
@@ -128,6 +129,7 @@ class TestResult:
     passed: bool
     detail: str = ''
     warning: bool = False  # passed but needs attention
+    elapsed_ms: Optional[int] = None
 
 
 # ── Color helpers ─────────────────────────────────────────────────────────────
@@ -149,6 +151,19 @@ def _dim(s):
 
 def _bold(s):
     return f"{Style.BRIGHT}{s}{Style.RESET_ALL}" if HAS_COLORAMA else s
+
+def _magenta(s):
+    return f"{Fore.MAGENTA}{Style.BRIGHT}{s}{Style.RESET_ALL}" if HAS_COLORAMA else s
+
+
+# ── Timing helper ─────────────────────────────────────────────────────────────
+
+def _run_timed(fn, *args, **kwargs) -> 'TestResult':
+    """Run a single-result test function and record elapsed time in milliseconds."""
+    t0 = time.perf_counter()
+    result = fn(*args, **kwargs)
+    result.elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    return result
 
 
 # ── STUN helpers ──────────────────────────────────────────────────────────────
@@ -261,8 +276,11 @@ def test_dns(domain: str, verbose: bool) -> TestResult:
     try:
         results = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
         if results:
-            ip = results[0][4][0]
-            return TestResult(name, True, f"→  {ip}")
+            ips = list(dict.fromkeys(r[4][0] for r in results))
+            detail = f"→  {ips[0]}"
+            if len(ips) > 1:
+                detail += f"  (+{len(ips) - 1} addr{'s' if len(ips) - 1 > 1 else ''})"
+            return TestResult(name, True, detail)
         return TestResult(name, False, "no addresses returned")
     except socket.gaierror as e:
         return TestResult(name, False, str(e) if verbose else "DNS lookup failed")
@@ -583,7 +601,7 @@ def _print_banner(domain: str, region: str, ctx: dict) -> None:
 
 
 def _print_section(title: str) -> None:
-    _flush(f"\n  {_cyan('▸')}  {_bold(title)}")
+    _flush(f"\n  {_magenta('▸')}  {_bold(title)}")
     _flush(f"  {_dim('─' * (BOX_WIDTH - 2))}")
 
 
@@ -596,7 +614,15 @@ def _icon(r: TestResult) -> str:
 def _print_result(r: TestResult) -> None:
     line = f"    {_icon(r)}  {r.name}"
     if r.detail:
-        line += f"  {_dim('·')}  {_dim(r.detail)}"
+        if r.warning:
+            detail_str = _yellow(r.detail)
+        elif r.passed:
+            detail_str = _green(r.detail)
+        else:
+            detail_str = _red(r.detail)
+        line += f"  {_dim('·')}  {detail_str}"
+    if r.elapsed_ms is not None:
+        line += f"  {_dim(f'{r.elapsed_ms}ms')}"
     _flush(line)
 
 
@@ -645,6 +671,36 @@ def _print_summary(total_passed: int, total_checks: int, total_warnings: int) ->
     _flush("  " + color(padded.ljust(inner)))
     _flush(color("  " + "═" * inner))
     _flush()
+
+
+# ── Technical log ─────────────────────────────────────────────────────────────
+
+def _print_technical_log(
+    countable: List[TestResult],
+    public_ip: Optional[str],
+    total_ms: int,
+) -> None:
+    """Print a technical details block: machine info, public IP, timing, blocked paths."""
+    _print_section("Technical Details")
+    try:
+        hostname = socket.gethostname()
+        local_ip = socket.gethostbyname(hostname)
+        _flush(f"    {_dim('Machine')}     {_bold(hostname)}  {_dim('·')}  {local_ip}")
+    except Exception:
+        pass
+
+    if public_ip:
+        _flush(f"    {_dim('Public IP')}   {_bold(public_ip)}  {_dim('via STUN')}")
+
+    n_passed = sum(1 for r in countable if r.passed)
+    duration_s = total_ms / 1000
+    _flush(f"    {_dim('Duration')}    {duration_s:.1f}s  {_dim('·')}  {n_passed}/{len(countable)} checks")
+
+    failed = [r for r in countable if not r.passed]
+    if failed:
+        _flush(f"    {_dim('Blocked')}     {_red(', '.join(r.name for r in failed))}")
+    else:
+        _flush(f"    {_dim('Blocked')}     {_green('none — all paths open')}")
 
 
 # ── JSON rendering ────────────────────────────────────────────────────────────
@@ -744,17 +800,17 @@ def _print_sample_output() -> None:
 
     _print_section("DNS & Cloud Connectivity")
     for r in [
-        TestResult("DNS  keepersecurity.com",           True,  "→  100.25.27.45"),
-        TestResult("HTTPS API  keepersecurity.com:443", True,  "HTTP 200"),
-        TestResult("WebSocket  connect.keepersecurity.com:443", True, "HTTP 401"),
+        TestResult("DNS  keepersecurity.com",           True,  "→  100.25.27.45  (+2 addrs)", elapsed_ms=18),
+        TestResult("HTTPS API  keepersecurity.com:443", True,  "HTTP 200", elapsed_ms=142),
+        TestResult("WebSocket  connect.keepersecurity.com:443", True, "HTTP 401", elapsed_ms=87),
     ]:
         _print_result(r)
 
     _print_section("STUN / TURN  ·  krelay.keepersecurity.com")
     for r in [
-        TestResult("TCP STUN  krelay.keepersecurity.com:3478",  True, "external IP  107.23.98.184"),
-        TestResult("UDP STUN  krelay.keepersecurity.com:3478",  True, "external IP  107.23.98.184"),
-        TestResult("TURN relay  krelay.keepersecurity.com:3478", True, "reachable · auth required"),
+        TestResult("TCP STUN  krelay.keepersecurity.com:3478",  True, "external IP  107.23.98.184", elapsed_ms=31),
+        TestResult("UDP STUN  krelay.keepersecurity.com:3478",  True, "external IP  107.23.98.184", elapsed_ms=24),
+        TestResult("TURN relay  krelay.keepersecurity.com:3478", True, "reachable · auth required", elapsed_ms=26),
     ]:
         _print_result(r)
 
@@ -765,10 +821,16 @@ def _print_sample_output() -> None:
 
     _print_section("LDAPS  ·  ldap.example.com:636")
     for r in [
-        TestResult("TCP 636  ldap.example.com",   True,  "port open"),
-        TestResult("TLS  ldap.example.com:636",   True,  "cert valid · expires 2027-01-15 (305 days)"),
+        TestResult("TCP 636  ldap.example.com",   True,  "port open", elapsed_ms=12),
+        TestResult("TLS  ldap.example.com:636",   True,  "cert valid · expires 2027-01-15 (305 days)", elapsed_ms=45),
     ]:
         _print_result(r)
+
+    _print_section("Technical Details")
+    _flush(f"    {_dim('Machine')}     {_bold('gateway-host.corp.com')}  {_dim('·')}  10.0.1.45")
+    _flush(f"    {_dim('Public IP')}   {_bold('107.23.98.184')}  {_dim('via STUN')}")
+    _flush(f"    {_dim('Duration')}    3.4s  {_dim('·')}  14/14 checks")
+    _flush(f"    {_dim('Blocked')}     {_green('none — all paths open')}")
 
     _print_summary(14, 14, 0)
     _flush(_dim("  (sample output — no network tests were run)"))
@@ -845,6 +907,7 @@ class NetworkTestCommand(Command):
             return
 
         # ── Terminal mode: stream output section by section ───────────────────
+        t_start = time.perf_counter()
         _print_banner(domain, region, ctx)
         groups = {}
         countable = []
@@ -852,10 +915,10 @@ class NetworkTestCommand(Command):
         # Group 1: DNS & Cloud Connectivity
         title = "DNS & Cloud Connectivity"
         _print_section(title)
-        ws_test = (test_websocket_authenticated(domain, params, verbose)
-                   if logged_in else test_websocket(domain, verbose))
-        g1 = [test_dns(domain, verbose),
-              test_https(domain, verbose),
+        ws_test = (_run_timed(test_websocket_authenticated, domain, params, verbose)
+                   if logged_in else _run_timed(test_websocket, domain, verbose))
+        g1 = [_run_timed(test_dns, domain, verbose),
+              _run_timed(test_https, domain, verbose),
               ws_test]
         groups[title] = g1
         for r in g1:
@@ -865,11 +928,21 @@ class NetworkTestCommand(Command):
         # Group 2: STUN / TURN
         title = f"STUN / TURN  ·  {krelay}"
         _print_section(title)
-        g2 = [test_tcp_stun(krelay, verbose), test_stun_udp(krelay, verbose), test_turn_reachability(krelay, verbose)]
+        tcp_stun_r = _run_timed(test_tcp_stun, krelay, verbose)
+        udp_stun_r = _run_timed(test_stun_udp, krelay, verbose)
+        turn_r     = _run_timed(test_turn_reachability, krelay, verbose)
+        g2 = [tcp_stun_r, udp_stun_r, turn_r]
         groups[title] = g2
         for r in g2:
             _print_result(r)
             countable.append(r)
+
+        # Extract public IP for technical log
+        public_ip = None
+        for r in (tcp_stun_r, udp_stun_r):
+            if r.passed and 'external IP' in r.detail:
+                public_ip = r.detail.split('external IP')[-1].strip()
+                break
 
         # Group 3: WebRTC media ports
         title = "WebRTC Media Ports  ·  UDP 49152\u201365535"
@@ -889,6 +962,8 @@ class NetworkTestCommand(Command):
                 _print_result(r)
                 countable.append(r)
 
+        total_ms = int((time.perf_counter() - t_start) * 1000)
+        _print_technical_log(countable, public_ip, total_ms)
         _print_summary(
             sum(1 for r in countable if r.passed),
             len(countable),
